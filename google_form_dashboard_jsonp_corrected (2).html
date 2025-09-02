@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Google Form Live Dashboard — JSONP (Corrected)</title>
+  <!-- Load Chart.js for charts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg:#0b1020; --panel:#121834; --text:#e8edf6; --muted:#94a3b8; --ok:#22c55e; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:system-ui,Segoe UI,Roboto,Arial; background:var(--bg); color:var(--text); }
+    header { padding:18px 22px; border-bottom:1px solid rgba(255,255,255,.08); display:flex; gap:12px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    h1 { margin:0; font-size:18px; }
+    .hint { color: var(--muted); font-size:12px; }
+    .wrap { padding:20px; max-width:1100px; margin:0 auto; display:grid; gap:18px; }
+    .panel { background: rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; }
+    .kpis { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+    .kpi { background: rgba(6,13,40,.55); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; }
+    .kpi h3 { margin:0 0 6px; color:var(--muted); font-size:12px; text-transform:uppercase; }
+    .value { font-size:34px; font-weight:800; }
+    select,button { background: rgba(6,13,40,.55); border:1px solid rgba(255,255,255,.12); color:var(--text); padding:10px 12px; border-radius:10px; }
+    .ok { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
+    .debug { white-space: pre-wrap; font-family: monospace; font-size:12px; color: #cbd5e1; background: #0b132e; border:1px solid rgba(255,255,255,.1); padding:10px; border-radius:10px; margin-top:10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Google Form — Live Dashboard</h1>
+      <div class="hint"><span class="ok"></span> Auto-refreshing every <span id="rs"></span>s</div>
+    </div>
+    <div>
+      <label class="hint" for="qSel">Chart question:</label>
+      <select id="qSel"></select>
+      <button id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="kpis">
+      <div class="kpi">
+        <h3>Total Responses</h3>
+        <div class="value" id="total">—</div>
+        <div class="hint" id="lu">Last updated: —</div>
+      </div>
+      <div class="kpi">
+        <h3>Latest Submission</h3>
+        <div class="value" id="latest">—</div>
+        <div class="hint">From first column or 'Timestamp'</div>
+      </div>
+    </section>
+    <section class="panel">
+      <canvas id="chart" height="160"></canvas>
+    </section>
+    <section class="panel">
+      <div class="hint">If this dashboard fails to load data, ensure your sheet is shared as “Anyone with the link: Viewer.”
+      Below is debug output for troubleshooting.</div>
+      <div id="debug" class="debug"></div>
+    </section>
+  </main>
+<script>
+  // ===== Configuration =====
+  // The original Sheet ID (the part after /d/ in your edit URL). When your sheet is
+  // shared with "Anyone with the link", this endpoint supports JSONP.
+  const SHEET_ID = "1EZUuiQ9SVH_WwqK_r-xoOzy82w2Qm67C48oF_BSSpyo";
+  // Try loading these sheet tabs (gids) in order. The first one that returns
+  // successfully will be used. Update this array if your responses live on a
+  // different tab. The default includes Form Responses 1 (2050810509) and the
+  // first sheet (0) as a fallback.
+  const GIDS = ["2050810509", "0"];
+  // Auto-refresh interval in seconds.
+  const REFRESH_SECONDS = 15;
+  document.getElementById('rs').textContent = String(REFRESH_SECONDS);
+
+  let headers = [];
+  let rows = [];
+  let chart;
+  let currentScript;
+
+  // Append debug messages to the debug panel
+  function debug(msg) {
+    const el = document.getElementById('debug');
+    el.textContent += msg + '\n';
+  }
+
+  // Build a JSONP URL for a given gid and callback name
+  function buildJsonpUrl(gid, callbackName) {
+    const tq = encodeURIComponent('select *');
+    return `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${gid}&tq=${tq}&tqx=responseHandler:${callbackName}`;
+  }
+
+  // Remove the currently injected script tag (if any)
+  function removeCurrentScript() {
+    if (currentScript && currentScript.parentNode) {
+      currentScript.parentNode.removeChild(currentScript);
+      currentScript = null;
+    }
+  }
+
+  // Try each gid in sequence until we get a valid response. Returns a Promise that
+  // resolves when data is loaded, or rejects if all gids fail.
+  function loadData() {
+    // Index to track which gid we are currently trying
+    let gidIndex = 0;
+    return new Promise((resolve, reject) => {
+      function tryNext() {
+        if (gidIndex >= GIDS.length) {
+          reject(new Error('All gids failed. Please share the correct gid for your responses tab.'));
+          return;
+        }
+        const gid = GIDS[gidIndex++];
+        const callbackName = 'handleGViz_' + gid + '_' + Math.random().toString(36).slice(2);
+        debug(`Trying gid=${gid}`);
+        window[callbackName] = function(response) {
+          try {
+            if (!response || !response.table) throw new Error('No table in response');
+            const table = response.table;
+            headers = table.cols.map(col => col.label || col.id || '');
+            rows = table.rows.map(row => {
+              const obj = {};
+              headers.forEach((col, idx) => {
+                const cell = row.c[idx];
+                obj[col] = cell && typeof cell.v !== 'undefined' ? cell.v : '';
+              });
+              return obj;
+            });
+            debug(`Success loading gid=${gid}`);
+            updateDashboard();
+            resolve();
+          } catch (err) {
+            debug(`Failed gid=${gid} → ${err.message}`);
+            tryNext();
+          } finally {
+            delete window[callbackName];
+            removeCurrentScript();
+          }
+        };
+        // Build JSONP script
+        const url = buildJsonpUrl(gid, callbackName);
+        const script = document.createElement('script');
+        script.src = url;
+        script.onerror = () => {
+          debug(`Script load error for gid=${gid}`);
+          delete window[callbackName];
+          removeCurrentScript();
+          tryNext();
+        };
+        document.body.appendChild(script);
+        currentScript = script;
+      }
+      tryNext();
+    });
+  }
+
+  // Update KPIs and chart after rows/headers are populated
+  function updateDashboard() {
+    // Update totals
+    document.getElementById('total').textContent = rows.length.toString();
+    const tsIndex = headers.findIndex(h => /^timestamp$/i.test(h));
+    const lastRow = rows[rows.length - 1] || {};
+    const latestVal = tsIndex >= 0 ? lastRow[headers[tsIndex]] : lastRow[headers[0]];
+    document.getElementById('latest').textContent = latestVal || '—';
+    document.getElementById('lu').textContent = 'Last updated: ' + new Date().toLocaleString();
+
+    // Populate dropdown
+    const sel = document.getElementById('qSel');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    headers.forEach((h, i) => {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = h;
+      sel.appendChild(opt);
+    });
+    let defIdx = headers.findIndex((h,i) => i !== tsIndex);
+    if (defIdx < 0) defIdx = 0;
+    sel.value = prev || String(defIdx);
+    renderChart();
+  }
+
+  // Render bar chart using Chart.js
+  function renderChart() {
+    const sel = document.getElementById('qSel');
+    const colIndex = parseInt(sel.value) || 0;
+    const key = headers[colIndex] || '';
+    if (!key) return;
+    const counts = new Map();
+    rows.forEach(row => {
+      let v = (row[key] || '').toString().trim();
+      if (!v) v = '(blank)';
+      if (v.includes(',')) {
+        v.split(',').map(s => s.trim()).forEach(piece => {
+          if (!piece) return;
+          counts.set(piece, (counts.get(piece) || 0) + 1);
+        });
+      } else {
+        counts.set(v, (counts.get(v) || 0) + 1);
+      }
+    });
+    const sorted = Array.from(counts.entries()).sort((a,b) => b[1] - a[1]);
+    const labels = sorted.map(([k]) => k);
+    const data = sorted.map(([,v]) => v);
+    const ctx = document.getElementById('chart').getContext('2d');
+    if (chart) chart.destroy();
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: key, data }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#cbd5e1' }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { precision: 0, color: '#cbd5e1' } }
+        }
+      }
+    });
+  }
+
+  // Event listeners
+  document.getElementById('qSel').addEventListener('change', renderChart);
+  document.getElementById('refreshBtn').addEventListener('click', () => {
+    loadData().catch(err => alert(err.message));
+  });
+
+  // Initial load and periodic refresh
+  loadData().catch(err => {
+    debug(err.message);
+    alert('Initial load failed: ' + err.message);
+  });
+  setInterval(() => {
+    loadData().catch(() => {});
+  }, REFRESH_SECONDS * 1000);
+</script>
+</body>
+</html>
