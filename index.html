@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Google Form Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    :root { --bg:#0b1020; --panel:#121834; --text:#e8edf6; --muted:#94a3b8; --ok:#22c55e; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;background:#0b1020;color:var(--text)}
+    header{padding:18px 22px;border-bottom:1px solid rgba(255,255,255,.08);display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+    h1{margin:0;font-size:18px}
+    .wrap{padding:20px;max-width:1100px;margin:0 auto;display:grid;gap:18px}
+    .panel{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px}
+    .kpis{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+    .kpi{background:rgba(6,13,40,.55);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px}
+    .kpi h3{margin:0 0 6px;color:var(--muted);font-size:12px;text-transform:uppercase}
+    .value{font-size:34px;font-weight:800}
+    select,button{background:rgba(6,13,40,.55);border:1px solid rgba(255,255,255,.12);color:var(--text);padding:10px 12px;border-radius:10px}
+    .hint{color:var(--muted);font-size:12px}
+    .ok{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Google Form — Live Dashboard</h1>
+      <div class="hint"><span class="ok"></span> Auto-refreshing every <span id="rs">15</span>s</div>
+    </div>
+    <div>
+      <label class="hint" for="qSel">Chart question:</label>
+      <select id="qSel"></select>
+      <button id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="kpis">
+      <div class="kpi">
+        <h3>Total Responses</h3>
+        <div class="value" id="total">—</div>
+        <div class="hint" id="lu">Last updated: —</div>
+      </div>
+      <div class="kpi">
+        <h3>Latest Submission</h3>
+        <div class="value" id="latest">—</div>
+        <div class="hint">Read from Timestamp/header 1</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <canvas id="chart" height="160"></canvas>
+    </section>
+
+    <section class="panel">
+      <div class="hint">Hosted build for GitHub Pages (root URL). Uses Published CSV.</div>
+    </section>
+  </main>
+
+<script>
+const RS = 15; document.getElementById("rs").textContent = RS.toString();
+
+// Your published-to-web CSV (from your /pub link). Change gid if your tab is different.
+const PUBLISHED_CSV =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vQTN-Tp4d1X_9VLTGmBEM41P-5TWupDzOUfiqrwCBZIQKTSBI6jrLwfaVOdKxSTeKuw2pPoIeQ4pxnn/pub?gid=2050810509&single=true&output=csv";
+
+let headers = [];
+let rows = [];
+let chart;
+
+async function fetchCsv() {
+  const res = await fetch(PUBLISHED_CSV, { cache: "no-store", credentials: "omit" });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return await res.text();
+}
+
+async function loadData() {
+  const csv = await fetchCsv();
+  const parsed = Papa.parse(csv, { header: true, dynamicTyping: false, skipEmptyLines: true });
+  headers = parsed.meta.fields || [];
+  rows = parsed.data || [];
+
+  // KPIs
+  document.getElementById("total").textContent = rows.length.toString();
+  const tKey = headers.find(h => /^timestamp$/i.test(h)) || headers[0];
+  document.getElementById("latest").textContent = rows.length ? (rows[rows.length-1][tKey] || "—") : "—";
+  document.getElementById("lu").textContent = "Last updated: " + new Date().toLocaleString();
+
+  // Dropdown
+  const sel = document.getElementById("qSel");
+  const prev = sel.value; sel.innerHTML = "";
+  headers.forEach((h,i) => { const opt = document.createElement("option"); opt.value = i; opt.textContent = h; sel.appendChild(opt); });
+  const tsIdx = headers.findIndex(h => /^timestamp$/i.test(h));
+  let def = headers.findIndex((_,i)=> i!==tsIdx); if (def<0) def = 0;
+  sel.value = prev || String(def);
+
+  renderChart();
+}
+
+function renderChart() {
+  const sel = document.getElementById("qSel");
+  const key = headers[parseInt(sel.value)||0]; if (!key) return;
+
+  const counts = new Map();
+  for (const r of rows) {
+    let v = (r[key] ?? "").toString().trim();
+    if (!v) v = "(blank)";
+    if (v.includes(",")) {
+      v.split(",").map(s=>s.trim()).forEach(p => { if(!p) return; counts.set(p,(counts.get(p)||0)+1); });
+    } else {
+      counts.set(v,(counts.get(v)||0)+1);
+    }
+  }
+  const sorted = Array.from(counts.entries()).sort((a,b)=>b[1]-a[1]);
+  const labels = sorted.map(([k])=>k);
+  const data = sorted.map(([,v])=>v);
+
+  const ctx = document.getElementById("chart").getContext("2d");
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, { type:"bar", data:{ labels, datasets:[{ label:key, data }] }, options:{ responsive:true, maintainAspectRatio:false } });
+}
+
+document.getElementById("qSel").addEventListener("change", renderChart);
+document.getElementById("refreshBtn").addEventListener("click", () => loadData().catch(e => alert(e.message)));
+
+// Kickoff + auto refresh
+loadData().catch(e => alert("Error: " + e.message));
+setInterval(() => loadData().catch(()=>{}), RS*1000);
+</script>
+</body>
+</html>
